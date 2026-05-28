@@ -12,7 +12,26 @@ self:
 let
   cfg = config.programs.cade;
   exe = lib.getExe cfg.package;
-  snippets = import ./snippets.nix;
+  configValues = lib.filterAttrs (_: v: v != null) {
+    inherit (cfg) verbosity;
+    long_running_warning_ms = cfg.longRunningWarningMs;
+  };
+  tomlFormat = pkgs.formats.toml { };
+  generatedConfigFile = tomlFormat.generate "cade-config.toml" configValues;
+  activeConfigFile =
+    if cfg.configFile != null then
+      cfg.configFile
+    else if configValues != { } then
+      generatedConfigFile
+    else
+      null;
+  cadeCmd = lib.escapeShellArgs (map toString (
+    [ exe ] ++ lib.optionals (activeConfigFile != null) [
+      "--config"
+      activeConfigFile
+    ]
+  ));
+  snippets = import ./snippets.nix { cade = cadeCmd; };
 in
 {
   options.programs.cade = {
@@ -41,6 +60,29 @@ in
       type = lib.types.bool;
       default = true;
       description = "Add the cade hook to interactive fish sessions.";
+    };
+
+    verbosity = lib.mkOption {
+      type = lib.types.nullOr (lib.types.enum [
+        "quiet"
+        "normal"
+        "vars"
+        "trace"
+      ]);
+      default = null;
+      description = "Default diagnostic verbosity written to cade's generated TOML config.";
+    };
+
+    longRunningWarningMs = lib.mkOption {
+      type = lib.types.nullOr lib.types.ints.positive;
+      default = null;
+      description = "External loader warning threshold, in milliseconds, written to cade's generated TOML config.";
+    };
+
+    configFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = "Strict TOML config path passed to cade with --config instead of generating one from module options.";
     };
 
     # Nushell, Elvish, and Murex have no system-level interactive-init hook on
@@ -74,19 +116,26 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = [
+      {
+        assertion = cfg.configFile == null || configValues == { };
+        message = "programs.cade.configFile cannot be combined with programs.cade.verbosity or programs.cade.longRunningWarningMs.";
+      }
+    ];
+
     environment.systemPackages = [ cfg.package ];
 
     # bash and zsh evaluate the hook; the shell flag must be enabled by the user
     # (programs.zsh.enable / shell installed) for the init file to be sourced.
     programs.bash.interactiveShellInit = lib.mkIf cfg.enableBashIntegration ''
-      eval "$(${exe} hook bash)"
+      eval "$(${cadeCmd} hook bash)"
     '';
     programs.zsh.interactiveShellInit = lib.mkIf cfg.enableZshIntegration ''
-      eval "$(${exe} hook zsh)"
+      eval "$(${cadeCmd} hook zsh)"
     '';
     # fish sources the hook directly rather than via eval
     programs.fish.interactiveShellInit = lib.mkIf cfg.enableFishIntegration ''
-      ${exe} hook fish | source
+      ${cadeCmd} hook fish | source
     '';
   };
 }
