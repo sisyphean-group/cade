@@ -129,10 +129,7 @@ impl ShellOutput for Fish {
     }
     fn hook_init(&self, cade_exe: &str, cade_args: &[String]) -> String {
         r#"function __cade_hook --on-event fish_prompt
-    if test "$PWD" != "$__cade_last_pwd"; or set -q __CADE_LAYERS
-        __CADE__ reload --shell fish | source
-        set -g __cade_last_pwd $PWD
-    end
+    __CADE__ reload --shell fish | source
 end
 "#
         .replace("__CADE__", &fish_command(cade_exe, cade_args))
@@ -162,10 +159,7 @@ impl ShellOutput for Bash {
     fn hook_init(&self, cade_exe: &str, cade_args: &[String]) -> String {
         r#"_cade_hook() {
     local previous_exit_status=$?
-    if [[ "$PWD" != "$__cade_last_pwd" || -n "${__CADE_LAYERS:-}" ]]; then
-        eval "$(__CADE__ reload --shell bash)"
-        __cade_last_pwd="$PWD"
-    fi
+    eval "$(__CADE__ reload --shell bash)"
     return $previous_exit_status
 }
 if [[ ";${PROMPT_COMMAND[*]:-};" != *";_cade_hook;"* ]]; then
@@ -198,10 +192,7 @@ impl ShellOutput for Zsh {
     }
     fn hook_init(&self, cade_exe: &str, cade_args: &[String]) -> String {
         r#"_cade_hook() {
-    if [[ "$PWD" != "$__cade_last_pwd" || -n "${__CADE_LAYERS:-}" ]]; then
-        eval "$(__CADE__ reload --shell zsh)"
-        __cade_last_pwd="$PWD"
-    fi
+    eval "$(__CADE__ reload --shell zsh)"
 }
 typeset -ag precmd_functions
 if (( ! ${precmd_functions[(I)_cade_hook]} )); then
@@ -251,23 +242,20 @@ let nu_exe = (try { which nu | get path.0 } catch { "nu" })
 $env.config.hooks.pre_prompt = (
     ($env.config.hooks?.pre_prompt? | default [])
     | append {||
-        if ($env.PWD != ($env.__cade_last_pwd? | default "")) or ("__CADE_LAYERS" in $env) {
-            for line in (^$cade ...$cade_args reload --shell nushell | lines) {
-                if ($line | str trim | is-empty) { continue }
-                let m = ($line | from json)
-                if "s" in $m { load-env $m.s }
-                if "u" in $m { hide-env --ignore-errors $m.u }
-                if "h" in $m {
-                    # run hook in a child nu, detect env changes by diffing
-                    # pre/post $env in-process. JSON diff goes to stderr via
-                    # print --stderr so hook stdout can't contaminate it.
-                    let prog = ("let __pre = $env\n" + $m.h + "\nlet __post = $env\nlet __set = ($__post | transpose k v | where {|r| ($r.v | describe) == \"string\" and $r.k not-in [PWD OLDPWD] and (($__pre | get --optional $r.k) != $r.v)} | reduce -f {} {|r, a| $a | upsert $r.k $r.v}); {set: $__set, unset: ($__pre | columns | where {|k| $k not-in ($__post | columns)})} | to json | print --stderr")
-                    let d = (^$nu_exe --no-config-file --commands $prog err>| from json)
-                    load-env $d.set
-                    for k in $d.unset { hide-env --ignore-errors $k }
-                }
+        for line in (^$cade ...$cade_args reload --shell nushell | lines) {
+            if ($line | str trim | is-empty) { continue }
+            let m = ($line | from json)
+            if "s" in $m { load-env $m.s }
+            if "u" in $m { hide-env --ignore-errors $m.u }
+            if "h" in $m {
+                # run hook in a child nu, detect env changes by diffing
+                # pre/post $env in-process. JSON diff goes to stderr via
+                # print --stderr so hook stdout can't contaminate it.
+                let prog = ("let __pre = $env\n" + $m.h + "\nlet __post = $env\nlet __set = ($__post | transpose k v | where {|r| ($r.v | describe) == \"string\" and $r.k not-in [PWD OLDPWD] and (($__pre | get --optional $r.k) != $r.v)} | reduce -f {} {|r, a| $a | upsert $r.k $r.v}); {set: $__set, unset: ($__pre | columns | where {|k| $k not-in ($__post | columns)})} | to json | print --stderr")
+                let d = (^$nu_exe --no-config-file --commands $prog err>| from json)
+                load-env $d.set
+                for k in $d.unset { hide-env --ignore-errors $k }
             }
-            $env.__cade_last_pwd = $env.PWD
         }
     }
 )
@@ -299,13 +287,9 @@ impl ShellOutput for Elvish {
         format!("{command};")
     }
     fn hook_init(&self, cade_exe: &str, cade_args: &[String]) -> String {
-        r#"var cade-last-pwd = ''
-set edit:before-readline = [
+        r#"set edit:before-readline = [
     {||
-        if (or (not-eq $pwd $cade-last-pwd) (has-env __CADE_LAYERS)) {
-            eval (__CADE_CMD__ reload --shell elvish | slurp)
-            set cade-last-pwd = $pwd
-        }
+        eval (__CADE_CMD__ reload --shell elvish | slurp)
     }
 ]
 "#
@@ -396,6 +380,21 @@ mod tests {
                 .hook_init(exe, &args)
                 .contains(r#"let cade_args = ["--config","/tmp/cade config.toml"]"#)
         );
+    }
+
+    #[test]
+    fn prompt_hooks_reload_without_pwd_change_guard() {
+        for hook in [
+            Bash.hook_init("cade", &[]),
+            Zsh.hook_init("cade", &[]),
+            Fish.hook_init("cade", &[]),
+            Nushell.hook_init("cade", &[]),
+            Elvish.hook_init("cade", &[]),
+        ] {
+            assert!(hook.contains("reload --shell"), "{hook}");
+            assert!(!hook.contains("__cade_last_pwd"), "{hook}");
+            assert!(!hook.contains("cade-last-pwd"), "{hook}");
+        }
     }
 
     #[test]
