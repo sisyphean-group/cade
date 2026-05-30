@@ -1,4 +1,6 @@
 use crate::verbosity::{self, Verbosity};
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
 
@@ -7,6 +9,11 @@ pub trait ShellOutput {
     fn unset_env(&self, key: &str) -> String;
     fn emit_hook(&self, command: &str) -> String;
     fn hook_init(&self, cade_exe: &str, cade_args: &[String]) -> String;
+    // buffered targets (json) collect everything and emit here once all
+    // set/unset calls are done; line shells emit inline and return nothing
+    fn finish(&self) -> String {
+        String::new()
+    }
 }
 
 /// A valid env var identifier. Prevents breakout
@@ -62,6 +69,8 @@ pub enum ShellName {
     Nushell,
     Elvish,
     Murex,
+    // not a shell: a direnv-compatible env diff for tools to consume
+    Json,
 }
 
 impl fmt::Display for ShellName {
@@ -73,6 +82,7 @@ impl fmt::Display for ShellName {
             ShellName::Nushell => write!(f, "nushell"),
             ShellName::Elvish => write!(f, "elvish"),
             ShellName::Murex => write!(f, "murex"),
+            ShellName::Json => write!(f, "json"),
         }
     }
 }
@@ -87,6 +97,7 @@ impl FromStr for ShellName {
             "nushell" | "nu" => Ok(ShellName::Nushell),
             "elvish" => Ok(ShellName::Elvish),
             "murex" => Ok(ShellName::Murex),
+            "json" => Ok(ShellName::Json),
             _ => Err(format!("unknown shell: {s}")),
         }
     }
@@ -101,6 +112,7 @@ impl ShellName {
             ShellName::Nushell => Box::new(Nushell),
             ShellName::Elvish => Box::new(Elvish),
             ShellName::Murex => Box::new(Murex),
+            ShellName::Json => Box::new(Json::new()),
         }
     }
 }
@@ -354,6 +366,54 @@ impl ShellOutput for Murex {
     }
 }
 
+// --- Json ---
+
+// a direnv-compatible env diff: one json object, set keys to their value and
+// unset keys to null. buffered so serde owns the escaping; cade uses U+001F as
+// a value separator, and hand-rolled json (e.g. nushell's `to json`) emits it
+// raw, which is invalid
+pub struct Json {
+    changes: RefCell<BTreeMap<String, Option<String>>>,
+}
+
+impl Json {
+    pub fn new() -> Self {
+        Json {
+            changes: RefCell::new(BTreeMap::new()),
+        }
+    }
+}
+
+impl ShellOutput for Json {
+    fn set_env(&self, key: &str, value: &str) -> String {
+        if is_valid_key(key) {
+            self.changes
+                .borrow_mut()
+                .insert(key.to_string(), Some(value.to_string()));
+        }
+        String::new()
+    }
+    fn unset_env(&self, key: &str) -> String {
+        if is_valid_key(key) {
+            self.changes.borrow_mut().insert(key.to_string(), None);
+        }
+        String::new()
+    }
+    // hooks have no representation in a static env diff (direnv drops them too)
+    fn emit_hook(&self, _command: &str) -> String {
+        String::new()
+    }
+    fn hook_init(&self, _cade_exe: &str, _cade_args: &[String]) -> String {
+        String::new()
+    }
+    fn finish(&self) -> String {
+        format!(
+            "{}\n",
+            serde_json::to_string(&*self.changes.borrow()).unwrap_or_else(|_| "{}".to_string())
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,5 +506,18 @@ mod tests {
         // a JSON directive parsed with `from json`, never run as nu code
         let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
         assert_eq!(v["s"]["X"], "$(id)\"x");
+    }
+
+    #[test]
+    fn json_buffers_one_valid_object_escaping_separators() {
+        let json = Json::new();
+        // set_env/unset_env emit nothing inline; finish() emits the whole object
+        assert_eq!(json.set_env("A", "x\x1fy"), "");
+        assert_eq!(json.unset_env("B"), "");
+        let out = json.finish();
+        // strict parse proves the U+001F separator was escaped, not emitted raw
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["A"], "x\x1fy");
+        assert!(v["B"].is_null());
     }
 }
