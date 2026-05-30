@@ -260,7 +260,7 @@ $env.config.hooks.pre_prompt = (
                 if "h" in $m {
                     # no in-scope eval, so run the hook in a child nu and diff
                     # its env before/after to propagate vars it set or unset.
-                    let prog = ("let __pre = $env\n" + $m.h + "\nlet __post = $env\nlet __set = ($__post | transpose k v | where {|r| ($r.v | describe) == \"string\" and $r.k not-in [PWD OLDPWD] and (($__pre | get -i $r.k) != $r.v)} | reduce -f {} {|r, a| $a | upsert $r.k $r.v}); {set: $__set, unset: ($__pre | columns | where {|k| $k not-in ($__post | columns)})} | to json")
+                    let prog = ("let __pre = $env\n" + $m.h + "\nlet __post = $env\nlet __set = ($__post | transpose k v | where {|r| ($r.v | describe) == \"string\" and $r.k not-in [PWD OLDPWD] and (($__pre | get --optional $r.k) != $r.v)} | reduce -f {} {|r, a| $a | upsert $r.k $r.v}); {set: $__set, unset: ($__pre | columns | where {|k| $k not-in ($__post | columns)})} | to json")
                     let d = (^$nu_exe --no-config-file --commands $prog | from json)
                     load-env $d.set
                     for k in $d.unset { hide-env --ignore-errors $k }
