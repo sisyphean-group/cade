@@ -55,18 +55,21 @@ fn try_main() -> Result<()> {
             let output = shell_name.get_output();
             cade.do_activation(output.as_ref(), Announce::Loaded)
                 .context("activate cade environment")?;
+            print!("{}", output.finish());
         }
         Exit { shell } => {
             let shell_name: ShellName = shell.parse().map_err(|e: String| anyhow::anyhow!(e))?;
             let output = shell_name.get_output();
             cade.do_restore(output.as_ref(), true, true)
                 .context("deactivate cade environment")?;
+            print!("{}", output.finish());
         }
         Reload { shell } => {
             let shell_name: ShellName = shell.parse().map_err(|e: String| anyhow::anyhow!(e))?;
             let output = shell_name.get_output();
             cade.do_reload(output.as_ref())
                 .context("reload cade environment")?;
+            print!("{}", output.finish());
         }
         Allow => cade.allow_here(true)?,
         Disallow => cade.allow_here(false)?,
